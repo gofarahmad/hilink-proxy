@@ -1,124 +1,158 @@
 #!/bin/bash
-# HiLink Proxy Auto-Deploy Script
-# Full otomatis: colok modem → langsung bisa pakai
+# Enhanced Auto-Deploy Script for NodeProxy
 
-# --- Konfigurasi ---
-PROXY_USER="proxyuser"
-PROXY_PASS=$(openssl rand -hex 8)  # Random password
-WEB_PORT=80
-DASHBOARD_URL="/etc/hilink-proxy/dashboard-url.txt"
+# --- Configuration ---
+APP_NAME="nodeproxy"
+APP_DIR="/opt/$APP_NAME"
+WEB_ROOT="/var/www/$APP_NAME"
+APP_PORT=5000
+NGINX_PORT=80
 
-# --- Warna Output ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# --- Fungsi Error ---
-error_exit() {
-  echo -e "${RED}[ERROR] $1${NC}" >&2
+# --- Phase 0: Enhanced Pre-flight ---
+if [ "$(id -u)" -ne 0 ]; then
+  echo "✗ Error: Root required" >&2
   exit 1
-}
+fi
 
-# --- Cek Root ---
-[ "$(id -u)" -ne 0 ] && error_exit "Script harus dijalankan sebagai root!"
+for cmd in git nginx python3 node npm; do
+  if ! command -v $cmd >/dev/null 2>&1; then
+    echo "✗ Missing dependency: $cmd" >&2
+    exit 1
+  done
+done
 
-# ==========================================
-# 1. INSTALL DEPENDENSI
-# ==========================================
-echo -e "${YELLOW}[1/5] Menginstall dependencies...${NC}"
-apt-get update -q || error_exit "Gagal update package list"
-apt-get install -y -q \
-  git build-essential \
-  python3-pip python3-venv \
-  nginx jq curl \
-  iptables-persistent || error_exit "Gagal install dependencies"
+# --- Phase 1: Optimized Dependency Install ---
+echo "✓ [1/7] Installing dependencies..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update && apt-get upgrade -y
+apt-get install -y \
+  git nginx python3-pip python3-venv \
+  nodejs npm net-tools vnstat \
+  iptables-persistent netplan.io gunicorn
 
-# ==========================================
-# 2. BUILD & INSTALL 3PROXY
-# ==========================================
-echo -e "${YELLOW}[2/5] Install 3proxy dari source...${NC}"
-cd /tmp
-git clone https://github.com/z3apa3a/3proxy || error_exit "Gagal clone 3proxy"
-cd 3proxy
-make -f Makefile.Linux || error_exit "Build 3proxy gagal"
-make install || error_exit "Install 3proxy gagal"
+# --- Phase 2: Directory Setup with Permissions ---
+echo "✓ [2/7] Creating directories..."
+mkdir -p $WEB_ROOT $APP_DIR /etc/$APP_NAME/{config,logs}
+chown -R www-data:www-data /etc/$APP_NAME
+chmod 750 /etc/$APP_NAME
 
-# Buat user proxy
-useradd -r -s /bin/false $PROXY_USER
-echo "$PROXY_USER:$PROXY_PASS" > /etc/3proxy/.3proxy_passwd
+# --- Phase 3: Safe Code Deployment ---
+echo "✓ [3/7] Deploying application..."
+if [ -d "$APP_DIR/.git" ]; then
+  cd $APP_DIR
+  git stash && git pull
+else
+  git clone https://github.com/gofarahmad/nodeproxy.git $APP_DIR || exit 1
+fi
 
-# ==========================================
-# 3. SETUP AUTOCONFIG SYSTEM
-# ==========================================
-echo -e "${YELLOW}[3/5] Setup auto-config...${NC}"
+# --- Phase 4: Robust Backend Setup ---
+echo "✓ [4/7] Configuring backend..."
+cd $APP_DIR/backend
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip wheel
+pip install -r requirements.txt || exit 1
 
-# Clone repo config
-mkdir -p /etc/hilink-proxy
-git clone https://github.com/username/hilink-proxy-server.git /etc/hilink-proxy/repo || error_exit "Gagal clone repo config"
+# Secure config
+cat > /etc/$APP_NAME/config/production.ini <<EOF
+[app]
+port = $APP_PORT
+debug = false
+secret_key = $(openssl rand -hex 32)
 
-# Install udev rule
-cp /etc/hilink-proxy/repo/auto-config/udev/99-hilink.rules /etc/udev/rules.d/
-udevadm control --reload-rules
+[database]
+path = /var/lib/$APP_NAME/db.sqlite
+EOF
 
-# Install systemd services
-cp /etc/hilink-proxy/repo/auto-config/systemd/*.service /etc/systemd/system/
-systemctl daemon-reload
+# Systemd with hardening
+cat > /etc/systemd/system/$APP_NAME.service <<EOF
+[Unit]
+Description=NodeProxy Backend
+After=network.target
 
-# Install scripts
-cp /etc/hilink-proxy/repo/auto-config/scripts/*.sh /usr/local/bin/
-chmod +x /usr/local/bin/{hilink-autoconf,update-3proxy}.sh
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=$APP_DIR/backend
+Environment="PATH=$APP_DIR/backend/venv/bin"
+EnvironmentFile=/etc/$APP_NAME/.env
+ExecStart=/usr/bin/gunicorn \
+  --workers 4 \
+  --bind 127.0.0.1:$APP_PORT \
+  --access-logfile /var/log/$APP_NAME-access.log \
+  --error-logfile /var/log/$APP_NAME-error.log \
+  --capture-output \
+  app:app
+Restart=always
+RestartSec=5
+ProtectSystem=full
+PrivateTmp=true
 
-# ==========================================
-# 4. SETUP NGINX DASHBOARD
-# ==========================================
-echo -e "${YELLOW}[4/5] Setup dashboard...${NC}"
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# Buat config Nginx
-cat > /etc/nginx/sites-available/hilink-proxy <<EOF
+# --- Phase 5: Frontend Build with Validation ---
+echo "✓ [5/7] Building frontend..."
+cd $APP_DIR/frontend
+npm ci --production || exit 1
+npm run build || exit 1
+cp -r dist/* $WEB_ROOT/
+
+# --- Phase 6: Secure Nginx Configuration ---
+echo "✓ [6/7] Configuring Nginx..."
+cat > /etc/nginx/sites-available/$APP_NAME <<EOF
 server {
-    listen $WEB_PORT;
-    root /etc/hilink-proxy/repo/dashboard;
-    
+    listen $NGINX_PORT;
+    server_name _;
+
+    root $WEB_ROOT;
+    index index.html;
+
     location / {
         try_files \$uri \$uri/ /index.html;
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
     }
-    
+
     location /api {
-        proxy_pass http://127.0.0.1:5000;
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
     }
-    
-    location /proxy-info {
-        alias /etc/hilink-proxy/;
-        autoindex on;
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico)$ {
+        expires 1y;
+        add_header Cache-Control "public";
     }
 }
 EOF
 
-ln -s /etc/nginx/sites-available/hilink-proxy /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default
+# --- Phase 7: Secure Service Activation ---
+echo "✓ [7/7] Starting services..."
+systemctl daemon-reload
+systemctl enable $APP_NAME
+systemctl restart $APP_NAME nginx
 
-# ==========================================
-# 5. START SERVICES & FINAL CONFIG
-# ==========================================
-echo -e "${YELLOW}[5/5] Starting services...${NC}"
-
-# Enable services
-systemctl enable hilink-autoconf 3proxy nginx
-systemctl start hilink-autoconf 3proxy nginx || error_exit "Gagal start services"
-
-# Firewall
-ufw allow $WEB_PORT/tcp
-ufw allow 7001:8999/tcp
+# Firewall with rate limiting
+ufw allow $NGINX_PORT/tcp
+ufw allow 22/tcp
+ufw allow 7001:8999/tcp && ufw limit 7001:8999/tcp
 ufw --force enable
 
-# Simpan info akses
-IP=$(hostname -I | awk '{print $1}')
-echo -e "${GREEN}\n=== INSTALASI SELESAI ==="
-echo -e "Dashboard URL: http://$IP"
-echo -e "Proxy Ports: 7001-8999 (auto-assign per modem)"
-echo -e "Credentials: $PROXY_USER / $PROXY_PASS"
-echo -e "Config Dir: /etc/hilink-proxy/${NC}"
+# --- Post-Deploy Verification ---
+echo "Running post-install checks..."
+if systemctl is-active --quiet $APP_NAME; then
+  echo "✅ Backend service is running"
+else
+  echo "❌ Backend service failed!" >&2
+  journalctl -u $APP_NAME -n 10 --no-pager
+fi
 
-# Simpan URL untuk akses nanti
-echo "http://$IP" > $DASHBOARD_URL
+PUBLIC_IP=$(curl -4 -s ifconfig.me)
+echo "========================================"
+echo " Deployment Complete!"
+echo " Dashboard: http://$PUBLIC_IP"
+echo "========================================"
