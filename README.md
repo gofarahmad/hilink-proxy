@@ -26,7 +26,7 @@ Sistem backend proxy berbasis modem HiLink (Huawei E3372h HiLink Mode), dikontro
 
 ```bash
 sudo mkdir -p /etc/hilink-proxy
-sudo git clone https://github.com/username/hilink-proxy-server.git /etc/hilink-proxy/repo
+sudo git clone https://github.com/gofarahmad/hilink-proxy /etc/hilink-proxy/repo
 ```
 
 > Ganti `username` dengan akun GitHub kamu yang berisi repositori ini.
