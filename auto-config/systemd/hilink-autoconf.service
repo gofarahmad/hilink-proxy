@@ -1,0 +1,16 @@
+[Unit]
+Description=HiLink Modem Auto-Configuration Service
+After=network.target
+Before=3proxy.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hilink-autoconf.sh
+Restart=on-failure
+RestartSec=5
+User=root
+Environment="MODEM_CONFIG=/etc/hilink-proxy/modems.json"
+Environment="LOG_FILE=/var/log/hilink-autoconf.log"
+
+[Install]
+WantedBy=multi-user.target

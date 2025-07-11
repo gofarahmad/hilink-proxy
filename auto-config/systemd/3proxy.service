@@ -1,0 +1,25 @@
+[Unit]
+Description=3Proxy Adaptive Proxy Service
+Documentation=https://3proxy.org/
+After=network.target hilink-autoconf.service
+Requires=hilink-autoconf.service
+
+[Service]
+Type=forking
+ExecStartPre=/usr/local/bin/update-3proxy.sh
+ExecStart=/usr/local/3proxy/bin/3proxy /etc/3proxy/3proxy.cfg
+ExecReload=/usr/local/bin/update-3proxy.sh && /bin/kill -HUP $MAINPID
+PIDFile=/var/run/3proxy.pid
+Restart=always
+RestartSec=3
+User=proxyuser
+Group=proxyuser
+
+# Security Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/etc/3proxy /var/log/3proxy.log
+
+[Install]
+WantedBy=multi-user.target
